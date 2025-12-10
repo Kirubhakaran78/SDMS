@@ -1,0 +1,716 @@
+import React, { useState, useEffect, useRef, useCallback,useTransition} from "react";
+import { MdKeyboardDoubleArrowRight } from "react-icons/md";
+import { useNavigate } from "react-router-dom";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import servicecall from "../../Services/servicecall";
+import PasswordPolicy from "../Login/PasswordPolicy";
+import { getOSName } from "../../Services/CF_osName";
+import { CF_sessionSet } from "../Common/CF_session";
+import { CF_DeviceChecking } from "../Common/CF_device";
+import { CF_encrypt, CF_decrypt } from "../Common/encryptiondecryption";
+import { motion, AnimatePresence } from "framer-motion";
+import ForgotPassword from "../Login/Emailverification";
+import Errordialog from "../Layout/Common/Errordialog";
+import Verificationcode from "./Verificationcode";
+import Cookies from "js-cookie";
+import AnimatedDropdown from '../Layout/Common/AnimatedDropdown';
+import { useToggle, useClickAway } from "@uidotdev/usehooks";
+import { useEventListener } from "usehooks-ts";
+import { useLanguage } from "../../Context/LanguageContext";
+import { useTranslation } from "react-i18next";
+import { useML } from "../../Services/useML";
+
+ 
+const loginSchema = z.object({
+  username: z.string().trim().min(1, "Please enter username."),
+  password: z.string().min(1, "Please enter password."),
+  site: z.string(),
+  domain: z.string(),
+  timeZone: z.string(),
+  language: z.string(),
+});
+
+
+function LoginForm({ onNavigate }) {
+  const navigate = useNavigate();
+  const { postData } = servicecall();
+  const [isPending, startTransition] = useTransition();
+  const { t } = useTranslation();
+
+ const {
+    register,
+    handleSubmit,
+    formState: { errors },
+    setValue,
+    getValues,
+    watch,
+    setError,
+    clearErrors,
+    setFocus, 
+  } = useForm({
+    resolver: zodResolver(loginSchema),
+    defaultValues: {
+      username: "",
+      password: "",
+      site: "",
+      domain: "",
+      timeZone: "",
+      language: "english",
+    },
+  });
+
+  const [sites, setSites] = useState([]);
+  const [domains, setDomains] = useState([]);
+  const [timeZones, setTimeZones] = useState([]);
+  
+  const [showMoreInfo, toggleMoreInfo] = useToggle(false);
+  const [showPolicyModal, togglePolicyModal] = useToggle(false);
+  const [showForgotPassword, toggleForgotPassword] = useToggle(false);
+  const [showVerfication, toggleVerification] = useToggle(false);
+  
+  const [passwordExpiryMsg, setPasswordExpiryMsg] = useState("");
+  const [validated, setValidated] = useState(false);
+  const [userCategory, setUserCategory] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [userEmail, setUserEmail] = useState("");
+  const [showTimeZone, setShowTimeZone] = useState();
+
+  const osNameRef = useRef("");
+  const usernameRef = useRef(null);
+  const policyModalRef = useRef(null);
+  const forgotPasswordRef = useRef(null);
+  const verificationRef = useRef(null);
+
+    const { currentLanguage, changeLanguage, languages } = useLanguage();
+
+    const applyML = useML();
+
+  const [dialogData, setDialogData] = useState({
+    open: false,
+    message: "",
+    type: "",
+  });
+
+  const showDialog = useCallback((message, type = "error") => {
+    setDialogData({ open: true, message, type });
+  }, []);
+
+  const handleDialogClose = useCallback(() => {
+    if (dialogData.type === "success") {
+      navigate("/Login");
+    }
+    setDialogData({ open: false, message: "", type: "" });
+  }, [dialogData.type, navigate]);
+
+  const getCookie = useCallback((name) => {
+    return Cookies.get(name) || "";
+  }, []);
+
+  const setCookie = useCallback((name, value, options = {}) => {
+    Cookies.set(name, value, { path: "/", ...options });
+  }, []);
+
+  const removeCookie = useCallback((name) => {
+    Cookies.remove(name, { path: "/" });
+  }, []);
+
+  const handleBeforeUnload = useCallback(() => {
+    removeCookie("sUsername");
+    setValue("username", "");
+    removeCookie("sitecode");
+  }, [removeCookie, setValue]);
+
+  useEffect(() => {
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [handleBeforeUnload]);
+
+  useClickAway(policyModalRef, () => {
+    if (showPolicyModal) togglePolicyModal();
+  });
+
+  useClickAway(forgotPasswordRef, () => {
+    if (showForgotPassword) toggleForgotPassword();
+  });
+
+  useClickAway(verificationRef, () => {
+    if (showVerfication) toggleVerification();
+  });
+
+  // One Time Load initialize
+  useEffect(() => {
+    const controller = new AbortController();
+    const initialize = async () => {
+      try {
+        getOSName((result) => (osNameRef.current = result));
+
+        const encryptedUsername = getCookie("sUsername");
+        if (encryptedUsername) {
+          try {
+            const decrypted = CF_decrypt(encryptedUsername);
+            setValue("username", decrypted);
+            setValidated(true);
+          } catch {}
+        }
+
+        const siteData = await postData("Login/LoadSite", {}, { signal: controller.signal });
+        const siteList = siteData.sitelist || [];
+         startTransition(() => {
+          setSites(siteList);
+        });
+
+        const currentSite = siteList?.[0]?.sSiteCode || "";
+        setValue("site", currentSite);
+
+        if (currentSite) {
+          const domainData = await postData("Login/LoadDomainCombo", {
+            sSiteCode: currentSite,
+          },{ signal: controller.signal });
+          const domainList = domainData || [];
+          
+          startTransition(() => {
+            setDomains(domainList);
+            if (domainList.length > 0) {
+              const defaultDomain = domainList[0].sDomainName;
+              setValue("domain", defaultDomain);
+              setUserCategory(defaultDomain);
+            } else {
+              setUserCategory("");
+            }
+          });
+        }
+
+
+        const tzData = await postData("Login/getTimeZones", {}, { signal: controller.signal });
+        const timeZonesList = tzData.TimeZones || [];
+
+       startTransition(() => {
+          setTimeZones(timeZonesList);
+        });
+
+        let browserLocalTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (browserLocalTimeZone === "Asia/Calcutta") browserLocalTimeZone = "Asia/Kolkata";
+
+        const foundTZ = timeZonesList.find(
+          (t) =>
+            t.sTimeZoneValue === browserLocalTimeZone ||
+            t.sTimeZoneValue.includes(browserLocalTimeZone) ||
+            browserLocalTimeZone.includes(t.sTimeZoneValue)
+        );
+
+        if (foundTZ) {
+          setValue("timeZone", foundTZ.sTimeZoneID);
+        }
+
+        const sUTCStatus = tzData["UTCStatus"] ? "true" : "false";
+        CF_sessionSet("UTCStatus", sUTCStatus, 1);
+        setShowTimeZone(!!tzData["UTCStatus"]);
+
+        const sShowUTCcol = tzData["sShowUTCcol"] ? "true" : "false";
+        CF_sessionSet("sShowUTCcol", sShowUTCcol, 1);
+      } catch (err) {
+        console.log(`Error: ${err}`);
+        showDialog(t('Auditpopup.somethingwentwrong'));
+      }  
+    };
+    initialize();
+
+    return () => {
+    controller.abort();
+  };
+
+  }, [getCookie, postData, setValue, showDialog]);
+
+
+  useEventListener("keydown", (e) => {
+  if (e.key === "Enter" && dialogData.open) {
+    e.preventDefault();
+    e.stopPropagation();
+    handleDialogClose();
+  }
+  if (e.key === "Enter" && !dialogData.open) {
+    e.preventDefault(); 
+  }
+});
+
+const getErrorMessage = useCallback((errorOrMessage) => {
+  if (!errorOrMessage) return '';
+  
+  if (errorOrMessage?.message) {
+    const msg = errorOrMessage.message;
+    return msg.includes('.') ? t(msg) : msg;
+  }
+  
+  if (errorOrMessage?.key && errorOrMessage?.count !== undefined) {
+    return t(errorOrMessage.key, { count: errorOrMessage.count });
+  }
+  
+  if (typeof errorOrMessage === 'string') {
+    return errorOrMessage.includes('.') ? t(errorOrMessage) : errorOrMessage;
+  }
+  
+  return '';
+}, [t]);
+
+
+  const validateUser = useCallback(async () => {
+    const username = getValues("username");
+    const site = getValues("site");
+
+    if (!username.trim() && validated === true) {
+      setValidated(false);
+      setFocus("username"); 
+      return false;
+    }
+    if (username.trim() === "") {
+      setValidated(false);
+      setFocus("username"); 
+      setError("username", { message: "Please enter username." });
+
+      setTimeout(() => {
+        clearErrors("username");
+      }, 3000);
+
+      return false;
+    }
+
+    try {
+      const obj = { sUsername: username.trim(), sSiteCode: site };
+      const data = await postData("Login/NewpasswordGenerationValidation", obj);
+      const info = data?.oResObj?.targetSource?.target?.sInformation || data?.oResObj?.sInformation;
+      const expiryDays = data?.oResObj?.targetSource?.target?.nPasswrdExpirydays;
+
+      if (info?.toLowerCase().includes("invalid user")) {
+        setError("username", { message: 'login.invaliduser' });
+        setFocus("username"); 
+        setValidated(false);
+        return false;
+      }
+
+      clearErrors("username");
+      clearErrors("password");
+      setPasswordExpiryMsg("");
+      setValidated(true);
+
+      setCookie("sUsername", CF_encrypt(username));
+      setCookie("sitecode", CF_encrypt(site));
+
+      if (info === "Password Expiry" && (expiryDays < 0 || data.oResObj.bPasswrdExpiryStatus)) {    
+        onNavigate("changepassword");
+        return false;
+      }
+
+      if (expiryDays >= 0 && expiryDays <= 5) {
+        // setPasswordExpiryMsg(`Password is valid for another ${expiryDays} day(s).`);
+        setPasswordExpiryMsg({ key: 'login.passwordexpiry', count: expiryDays });
+      }
+
+      if (info === "GenerateNewPassword") {
+          setPasswordExpiryMsg("");
+        onNavigate("createpassword");
+        return false;
+      } 
+      
+       if (info === "PolicyChanged") {
+      togglePolicyModal(); 
+      return false; 
+    }
+      return true;
+    } catch (err) {
+      console.error(err);
+    }
+  }, [validated, postData, setCookie, navigate, getValues, setError, clearErrors, setFocus]);
+
+
+ 
+const handleKeyDown = useCallback(
+  async (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const username = getValues("username");
+      
+      if (username.trim()) {
+        const canMoveFocus = await validateUser();
+        
+        if (canMoveFocus) {
+          setFocus("password");
+        }
+        else{
+          setFocus("username");
+        }
+      }
+    }
+  },
+  [validateUser, getValues, setFocus]
+);
+ 
+  const handleUsernameChange = useCallback((e) => {
+    const val = e.target.value;
+    setValue("username", val);
+    setCookie("sUsername", CF_encrypt(val));
+  }, [setValue, setCookie]);
+
+  const onSubmit = useCallback(
+    async (formData) => {
+      setLoading(true);
+      try {
+        const guid = new URLSearchParams(window.location.search).get("GUID");
+        const tenantID = new URLSearchParams(window.location.search).get("TenantID") || "";
+
+        const reqObj = {
+          sAvailableLicenseURL: "http://AGL107:8095/LicenseAPI/License/getAvailableLicenseCount",
+          loginObj: {
+            bScreenLock: false,
+            sDomainName: formData.domain || "SDMS",
+            sUsername: formData.username,
+            sSiteCode: formData.site,
+            sCategories: domains[0]?.sCategories,
+            sClientMachineName: osNameRef.current,
+            sPassword: formData.password,
+          },
+          sLoginFrom: guid ? "SharedLink" : "SDMS",
+        };
+
+        const response = await postData("Login/Login", reqObj);
+        console.log(response?.oResObj)
+        const info = response?.oResObj?.sInformation || response?.oResObj?.targetSource?.target?.sInformation;
+        const status = response?.oResObj?.bStatus ?? response?.oResObj?.targetSource?.target?.bStatus;
+
+        if (status && info === "Login Success") {
+          const data = response;
+
+          CF_sessionSet("sCategories", data.oResObj1.sCategories, 1);
+          CF_sessionSet("sSiteCode", data.oResObj1.sSiteCode, 1);
+          CF_sessionSet("sUserGroupID", data.oResObj1.sUserGroupID, 1);
+          CF_sessionSet("sUserGroupName", data.oResObj1.sUserGroupName, 1);
+          CF_sessionSet("sUserID", data.oResObj1.sUserID, 1);
+          CF_sessionSet("sSiteName", data.oResObj1.sSiteName, 1);
+          CF_sessionSet("sUsername", data.oResObj1.sUsername, 1);
+          CF_sessionSet("sUserStatus", data.oResObj1.sUserStatus, 1);
+          CF_sessionSet("sDomainName", data.oResObj1.sDomainName, 1);
+          CF_sessionSet("nIdleTime", data.oResObj.nIdealTime, 0);
+          CF_sessionSet("sLanguage", formData.language, 1);
+          CF_sessionSet("sTimeZoneID", formData.timeZone, 1);
+          CF_sessionSet(
+            "sTimeZoneValue",
+            timeZones.find((t) => t.sTimeZoneID === formData.timeZone)?.sTimeZoneValue || "",
+            1
+          );
+          CF_sessionSet("DownloadLinkLogoff", data.DownloadLinkLogoff, 0);
+          CF_sessionSet("ConcurrentUsersAvailableCount", data.oResObj.concurrentUsersAvailableCount, 0);
+          CF_sessionSet("upd", formData.password, 1);
+          CF_sessionSet("sSessionID", data.oResObj1.sSessionID, 1);
+          CF_sessionSet("sdbtype", data.sdbtype, 1);
+          CF_sessionSet("sTenantID", tenantID, 1);
+          CF_sessionSet("isLoggedIn", data.oResObj.sInformation, 0);
+
+          const checker = CF_DeviceChecking();
+          CF_sessionSet("device", checker.android || checker.iphone || checker.blackberry ? "tablet" : "desktop", 1);
+
+          if (guid) {
+            const expiryMinutes = data.DownloadLinkLogoff || 5;
+            const expires = new Date(Date.now() + expiryMinutes * 60 * 1000);
+            const cookieOptions = `; path=/; expires=${expires.toUTCString()}`;
+
+            document.cookie = `sCategories=${CF_encrypt(data.oResObj1.sCategories)}${cookieOptions}`;
+            document.cookie = `sSiteCode=${CF_encrypt(data.oResObj1.sSiteCode)}${cookieOptions}`;
+            document.cookie = `sUserGroupID=${CF_encrypt(data.oResObj1.sUserGroupID)}${cookieOptions}`;
+            document.cookie = `sUserID=${CF_encrypt(data.oResObj1.sUserID)}${cookieOptions}`;
+            document.cookie = `sUsername=${CF_encrypt(data.oResObj1.sUsername)}${cookieOptions}`;
+            document.cookie = `nIdleTime=${data.oResObj.nIdealTime}${cookieOptions}`;
+            document.cookie = `sUserGroupName=${CF_encrypt(data.oResObj1.sUserGroupName)}${cookieOptions}`;
+            document.cookie = `sSessionID=${CF_encrypt(data.oResObj1.sSessionID)}${cookieOptions}`;
+            document.cookie = `sTenantID=${CF_encrypt(tenantID)}${cookieOptions}`;
+
+            CF_sessionSet("linkPath", window.location.href, 1);
+            CF_sessionSet("reload", 1, 0);
+            navigate("/guid");
+          } else {
+            if (data.sProfileImageBytes) CF_sessionSet("sProfileImageBytes", data.sProfileImageBytes, 0);
+            CF_sessionSet("iPortalStatus", data.iPortalStatus ? "true" : "false", 1);
+            navigate("/Home");
+            removeCookie("sUsername");
+            setValue("username", "");
+            removeCookie("sitecode");
+          }
+        } else {
+        setFocus("password");
+          
+       const errorKeyMap = {
+  'invalidpassword': 'login.invalidpassword',
+  "userlocked": "login.userlocked",
+  'userlockedcontactadministrator':'warningmsg.userlockedcontactadministrator'
+};
+const translationKey = errorKeyMap[applyML(info)];
+const finalKeyOrText = translationKey || info;
+const msg = finalKeyOrText;
+showDialog(msg, "warning");
+
+
+        }
+      } catch (err) {
+        console.error(err);
+        setError("username", { message: "Unable to connect to server. Please try again." });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [domains, timeZones, postData, navigate, showDialog, setValue, removeCookie, setError, setFocus]
+  );
+
+
+  const handleForgotPassword = useCallback(async () => {
+    const username = getValues("username");
+    const site = getValues("site");
+
+    if (!username.trim()) {
+      showDialog("Please enter username before recovering password.", "error");
+      return;
+    } else {
+      document.cookie = `sUsername=${encodeURIComponent(CF_encrypt(username))}; path=/`;
+      document.cookie = `sitecode=${encodeURIComponent(CF_encrypt(site))}; path=/`;
+    }
+
+    try {
+      const req = {
+        sUsername: username.trim(),
+        sSiteCode: site.trim(),
+      };
+
+      const res = await postData("Login/getUserEmailID", req);
+      const email = res?.sUserMailID?.trim() || "";
+
+      if (!email) { 
+      const translationKey = 'login.noemaildforforgotpwd';
+    showDialog(translationKey || 'login.noemaildforforgotpwd', "information");
+        // showDialog(getErrorMessage('login.noemaildforforgotpwd'), "information");
+        return;
+      }
+
+      setUserEmail(email);
+      toggleForgotPassword();
+    } catch (err) {
+      console.error(err);
+      showDialog("Unable to fetch email ID. Please try again later.", "error");
+    }
+  }, [postData, showDialog, getValues]);
+
+  const handleVerificationOpen = useCallback(() => {
+    toggleForgotPassword();
+    toggleVerification();
+  }, []);
+
+
+  // console.log("Hello World");
+
+  return (
+    <>
+      <form onSubmit={handleSubmit(onSubmit)}>
+      
+        <div className="mb-3">
+          <label className="text-sm font-medium text-gray-600">{t("login.username")}</label>
+          <input
+            ref={usernameRef}
+            type="text"
+            {...register("username")}
+            onChange={handleUsernameChange}
+            onKeyDown={handleKeyDown}
+            autoComplete="off"
+            className="w-full text-sm font-semibold border-b-2 border-gray-300 focus:border-blue-500 outline-none"
+          />
+          {errors.username && <p className="text-red-500 text-sm">{getErrorMessage('login.enterusername')}</p>}
+        </div>
+
+        <div className="mb-6">
+          <label className="text-sm font-medium text-gray-600">{t('login.password')}</label>
+          <input
+            type="password"
+            {...register("password")}
+            onFocus={validateUser}
+            className="w-full text-sm font-semibold border-b-2 border-gray-300 focus:border-blue-500 outline-none"
+          />
+          {passwordExpiryMsg && <p className="text-yellow-600 text-sm">{getErrorMessage(passwordExpiryMsg)}</p>}
+        {/* {errors.password && (
+          <p className="text-red-500 text-sm">{getErrorMessage('login.enterpassword')}</p>
+        )} */}
+
+          {/* {errors.password && <p className="text-red-500 text-sm">{errors.password.message}</p>} */}
+        </div>
+
+      
+        <div className="mb-6">
+          <button
+            type="button"
+            onClick={toggleMoreInfo}
+            className="text-sm hover:font-bold font-semibold text-blue-600 hover:underline hover:translate-x-1 transform-all flex items-center"
+          >
+            {t('login.moreinformation')}
+            <MdKeyboardDoubleArrowRight
+              className={`mt-[4px] ml-1 transition-transform duration-300 ${showMoreInfo ? "rotate-90" : "rotate-0"}`}
+            />
+          </button>
+        </div>
+
+        <AnimatePresence>
+          {showMoreInfo && (
+            <motion.div
+              key="more-info"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.4, ease: "easeInOut" }}
+              className="mb-6 overflow-visible"
+            >
+              <AnimatedDropdown
+                label={t('login.site')}
+                name="site"
+                value={watch("site")}
+                options={sites}
+                displayKey="sSiteName"
+                valueKey="sSiteCode"
+                onChange={(e) => setValue("site", e.target.value)}
+              />
+
+              <AnimatedDropdown
+                label={t('login.domain')}
+                name="domain"
+                value={watch("domain")}
+                options={domains}
+                displayKey="sDomainName"
+                valueKey="sDomainName"
+                onChange={(e) => setValue("domain", e.target.value)}
+              />
+
+              {showTimeZone && (
+                <AnimatedDropdown
+                  label={t('login.timezone')}
+                  name="timeZone"
+                  value={watch("timeZone")}
+                  options={timeZones}
+                  displayKey="sTimeZoneValue"
+                  valueKey="sTimeZoneID"
+                  onChange={(e) => setValue("timeZone", e.target.value)}
+                  direction="down"
+                  isSearchable={true}
+                />
+              )}
+
+            
+              
+               <AnimatedDropdown
+      label={t('login.language')}
+      name="language"
+      value={currentLanguage}
+      options={languages}
+      displayKey="label"
+      valueKey="value"
+      onChange={(e) => changeLanguage(e.target.value)}
+      direction="up"
+    />
+
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <button type="submit" className="btn-primary hover:scale-95 hover:rounded-md" disabled={loading}>
+         {loading ? t("button.loggingIn") : t("button.login")}
+        </button>
+
+        {validated && userCategory === "SDMS" && (
+          <div className="text-center mt-5 mb-[-35px]">
+            <button
+              type="button"
+              onClick={handleForgotPassword}
+              className="text-blue-600 text-sm hover:scale-80 hover:underline hover:transform hover:font-bold font-semibold"
+            >
+              {t('login.forgotpassword')}
+            </button>
+          </div>
+        )}
+      </form>
+
+ 
+      <AnimatePresence>
+        {showPolicyModal && (
+          <motion.div
+            key="password-policy"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ type: "spring", stiffness: 220, damping: 30 }}
+            className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 backdrop-blur-sm"
+          >
+            <motion.div
+              ref={policyModalRef}
+              initial={{ scale: 1, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 1, opacity: 0 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="bg-white rounded-xl shadow-2xl w-[90%] max-w-lg overflow-hidden"
+            >
+              <PasswordPolicy onClose={togglePolicyModal} />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showForgotPassword && (
+          <motion.div
+            key="forgot-password"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ type: "spring", stiffness: 220, damping: 30 }}
+            className="fixed inset-0 z-[10000] flex items-start justify-center pt-10 bg-black/40 backdrop-blur-sm "
+          >
+            <motion.div
+              ref={forgotPasswordRef}
+              initial={{ scale: 1, opacity: 1 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 1, opacity: 1 }}
+              transition={{ duration: 0.1, ease: "easeInOut" }}
+              className="bg-white rounded-md  shadow-2xl w-[90%] max-w-lg overflow-hidden"
+            >
+              <ForgotPassword
+                onClose={toggleForgotPassword}
+                onVerificationOpen={handleVerificationOpen}
+                userData={{ sUserMailID: userEmail }}
+              />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showVerfication && (
+          <motion.div
+            key="verfication"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ type: "spring", stiffness: 220, damping: 30 }}
+            className="fixed inset-0 z-[10000] flex items-start justify-center pt-10 bg-black/40 backdrop-blur-sm "
+          >
+            <motion.div
+              ref={verificationRef}
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              transition={{ duration: 0.1, ease: "easeInOut" }}
+              className="bg-white rounded-md  shadow-2xl w-[90%] max-w-lg overflow-hidden"
+            >
+              <Verificationcode onClose={toggleVerification} userData={{ sUserMailID: userEmail }} />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {dialogData.open && <Errordialog message={dialogData.message} type={dialogData.type} onClose={handleDialogClose} />}
+    </>
+  );
+}
+
+export default LoginForm;
